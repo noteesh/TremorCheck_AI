@@ -1,24 +1,36 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { getMagnitudeSpectrum1To20Hz, isDominantInRange } from './fft'
+import { getMagnitudeSpectrum1To20Hz, isDominantInRange, computeSubmovementRate, computeSPARC, computeTrackingRMSE } from './fft'
 import './App.css'
 
 const SAMPLE_RATE = 60
 const WINDOW_FRAMES = 120
 const PD_LOW = 4
 const PD_HIGH = 6
+const REST_DURATION_MS = 5 * 1000
 const TRACKING_DURATION_MS = 30 * 1000
-const SAMPLE_INTERVAL_MS = 500
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000'
-const THROTTLE_MS = 33 // ~30fps UI updates to reduce lag (data still sampled at 60fps)
-const TRACKING_SENSITIVITY = 0.5 // 0–1: lower = less movement of your dot for same mouse/stick input
-const CONTROLLER_RANGE_SCALE = 2.2 // scale stick so limited physical radius still reaches full area (then clamp to ±1)
-const IDLE_RESET_MS = 1500 // reset dot to center after no input for this long
-const VELOCITY_SPEED = 1.8 // units per second at full stick (integrated movement)
-const INPUT_DEADZONE = 0.22 // stick magnitude below this = no input (avoids rest-position drift)
+const THROTTLE_MS = 33
+const CONTROLLER_RANGE_SCALE = 1.2   // reduced from 2.2 — stick reaches full area without over-scaling
+const IDLE_RESET_MS = 1500
+const VELOCITY_SPEED = 0.9           // reduced from 1.8 — slower cursor for precise tracking
+const INPUT_DEADZONE = 0.12          // reduced from 0.22 — more responsive at rest
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
-const RUMBLE_THRESHOLD = 0.30   // rumble reaches full at this dist (~1.4 max)
-const RUMBLE_DURATION_MIN = 15  // ms at low intensity
-const RUMBLE_DURATION_MAX = 120 // ms at full intensity
+const RUMBLE_THRESHOLD = 0.55        // rumble only kicks in when noticeably off-target (was 0.30)
+const RUMBLE_DURATION_MIN = 10       // shorter pulse at low intensity (was 15)
+const RUMBLE_DURATION_MAX = 60       // softer max (was 120)
+const RUMBLE_WEAK_MAX = 0.35         // max weak motor magnitude (was 0.7)
+const RUMBLE_STRONG_MAX = 0.18       // max strong motor magnitude (was 0.45)
+
+// Figure-8 (lemniscate): one full loop in FIGURE8_PERIOD_SEC seconds.
+const FIGURE8_PERIOD_SEC = 20
+function figure8Position(elapsedMs) {
+  const t = (elapsedMs / 1000) * (2 * Math.PI) / FIGURE8_PERIOD_SEC
+  const scale = 0.85
+  return {
+    x: scale * Math.sin(t),
+    y: scale * Math.sin(2 * t),
+  }
+}
 
 function useGamepadSlidingWindow() {
   const [stick, setStick] = useState({ x: 0, y: 0 })
@@ -34,9 +46,7 @@ function useGamepadSlidingWindow() {
   const lastInputTimeRef = useRef(performance.now())
   const lastTickTimeRef = useRef(performance.now())
   const lastMouseInputTimeRef = useRef(performance.now())
-  // Set to current target position during test, null otherwise
   const rumbleTargetRef = useRef(null)
-  // Set to the playfield DOM element so tick can compute dot size in normalized coords
   const rumblePlayfieldRef = useRef(null)
 
   useEffect(() => {
@@ -75,7 +85,6 @@ function useGamepadSlidingWindow() {
       ry = Math.max(-1, Math.min(1, ry * CONTROLLER_RANGE_SCALE))
       const mag = Math.hypot(rx, ry)
       if (mag > INPUT_DEADZONE) {
-        // optional: rescale so movement starts at deadzone edge (smoother feel)
         const scale = (mag - INPUT_DEADZONE) / (1 - INPUT_DEADZONE)
         const vx = (rx / mag) * scale * VELOCITY_SPEED * dt
         const vy = (ry / mag) * scale * VELOCITY_SPEED * dt
@@ -97,24 +106,20 @@ function useGamepadSlidingWindow() {
       }
     }
 
-    // Haptic feedback: scales smoothly with distance — silent on the dot, strong when far
+    // Haptic feedback: scales smoothly with distance
     if (pad?.vibrationActuator && rumbleTargetRef.current && rumblePlayfieldRef.current) {
       const target = rumbleTargetRef.current
       const dist = Math.hypot(dot.x - target.x, dot.y - target.y)
-      // Compute dead zone = visual radius of the target dot (16px) in normalized coords.
-      // The playfield maps its full width to [-1, 1], and dots travel ±45% of that.
-      // normalized_radius = (dot_px_radius / playfield_px_width) * 2
       const pfW = rumblePlayfieldRef.current.offsetWidth || 800
-      const dotDeadZone = (16 / pfW) * 2   // 16px = half of 32px target dot
+      const dotDeadZone = (16 / pfW) * 2
       if (dist > dotDeadZone) {
-        // ramp from 0 just outside dot to 1 at RUMBLE_THRESHOLD, then stays full
         const t = Math.min(1, Math.max(0, (dist - dotDeadZone) / (RUMBLE_THRESHOLD - dotDeadZone)))
         const duration = Math.round(RUMBLE_DURATION_MIN + t * (RUMBLE_DURATION_MAX - RUMBLE_DURATION_MIN))
         pad.vibrationActuator.playEffect('dual-rumble', {
           startDelay: 0,
           duration,
-          weakMagnitude: t * 0.7,
-          strongMagnitude: t * 0.45,
+          weakMagnitude: t * RUMBLE_WEAK_MAX,
+          strongMagnitude: t * RUMBLE_STRONG_MAX,
         }).catch(() => {})
       }
     }
@@ -149,301 +154,207 @@ function useGamepadSlidingWindow() {
     }
   }, [tick])
 
-  return { stick, spectrum, dominantInPD, bufferLength, usingMouse, reportMousePosition, clearBuffer, rumbleTargetRef, rumblePlayfieldRef }
-}
-
-function useTestMode() {
-  const [restFreqInPD, setRestFreqInPD] = useState(false)
-  const [activeFreqInPD, setActiveFreqInPD] = useState(false)
-  const [restSpectrum, setRestSpectrum] = useState(null)
-  const [activeSpectrum, setActiveSpectrum] = useState(null)
-  const latestRef = useRef({ spectrum: null, dominantInPD: false })
-
-  const clearTimers = () => {
-    timersRef.current.forEach((id) => clearInterval(id))
-    timersRef.current = []
-  }
-
-  // Shared capture helper — samples stickRef every 1/60s for `duration` seconds
-  const runCapture = useCallback((duration, onFrame, onDone) => {
-    let remaining = duration
-    setTimeLeft(duration)
-
-    const sampleTimer = setInterval(() => {
-      onFrame()
-    }, 1000 / SAMPLE_RATE)
-
-    const countTimer = setInterval(() => {
-      remaining -= 1
-      setTimeLeft(remaining)
-      if (remaining <= 0) {
-        clearInterval(sampleTimer)
-        clearInterval(countTimer)
-        timersRef.current = []
-        onDone()
-      }
-    }, 1000)
-
-    timersRef.current = [sampleTimer, countTimer]
-  }, [])
-
-  const startTest = useCallback(() => {
-    clearTimers()
-    restFramesRef.current = []
-    trackFramesRef.current = []
-    setResult(null)
-    setPhase('resting')
-
-    // Phase 1: rest
-    runCapture(
-      REST_DURATION,
-      () => {
-        const { x, y } = stickRef.current
-        restFramesRef.current.push([x, y])
-      },
-      () => {
-        // Phase 2: tracking
-        setPhase('tracking')
-        runCapture(
-          TRACK_DURATION,
-          () => {
-            const { x, y } = stickRef.current
-            const { x: tx, y: ty } = targetRef.current
-            trackFramesRef.current.push({ x, y, tx, ty })
-          },
-          () => {
-            setPhase('computing')
-            // Compute frontend metrics then send to backend
-            sendToBackend(restFramesRef.current, trackFramesRef.current, setResult, setLoading)
-              .then(() => setPhase('done'))
-          }
-        )
-      }
-    )
-  }, [stickRef, targetRef, runCapture])
-
-  const reset = useCallback(() => {
-    clearTimers()
-    setPhase('idle')
-    setResult(null)
-    setLoading(false)
-    restFramesRef.current = []
-    trackFramesRef.current = []
-  }, [])
-
-  const verdict =
-    restFreqInPD && !activeFreqInPD
-      ? 'High Correlation with PD Biomarkers detected.'
-      : 'No significant resting tremor detected.'
-
-  return {
-    captureRest,
-    captureActive,
-    updateLatest,
-    restFreqInPD,
-    activeFreqInPD,
-    restSpectrum,
-    activeSpectrum,
-    verdict,
-  }
-}
-
-// Figure-8 (lemniscate): one full loop in FIGURE8_PERIOD_SEC seconds.
-const FIGURE8_PERIOD_SEC = 20 // slightly faster than 30s
-function figure8Position(elapsedMs) {
-  const t = (elapsedMs / 1000) * (2 * Math.PI) / FIGURE8_PERIOD_SEC
-  const scale = 0.85 // target path uses most of the playfield
-  return {
-    x: scale * Math.sin(t),
-    y: scale * Math.sin(2 * t),
-  }
+  return { stick, spectrum, dominantInPD, bufferLength, usingMouse, setMouse, clearBuffer, rumbleTargetRef, rumblePlayfieldRef }
 }
 
 export default function App() {
-  const { stick, spectrum, dominantInPD, bufferLength, usingMouse, reportMousePosition, clearBuffer, rumbleTargetRef, rumblePlayfieldRef } =
-    useGamepadSlidingWindow()
-  const test = useTestMode()
+  const { stick, usingMouse, setMouse, rumbleTargetRef, rumblePlayfieldRef } = useGamepadSlidingWindow()
 
-  const [testPhase, setTestPhase] = useState('idle') // 'idle' | 'running' | 'analyzing' | 'done'
-  const [trackingElapsed, setTrackingElapsed] = useState(0)
-  const [geminiResult, setGeminiResult] = useState(null)
-  const [geminiError, setGeminiError] = useState(null)
-  const phaseStartRef = useRef(0)
-  const samplesRef = useRef([])
-  const sampleIntervalRef = useRef(null)
-  const comparisonIntervalRef = useRef(null)
-  const rafRef = useRef(null)
-  const testAreaRef = useRef(null)
-  const stickRef = useRef(stick)
-  stickRef.current = stick
+  // 'idle' | 'resting' | 'running' | 'analyzing' | 'done'
+  const [testPhase, setTestPhase] = useState('idle')
+  const [phaseElapsed, setPhaseElapsed] = useState(0)
+  const [result, setResult] = useState(null)
+  const [analysisError, setAnalysisError] = useState(null)
   const [lastComparison, setLastComparison] = useState(null)
   const [accuracyHistory, setAccuracyHistory] = useState([])
+
   const maxAccuracyPoints = 30
+  const phaseStartRef = useRef(0)
+  const restFramesRef = useRef([])
+  const trackFramesRef = useRef([])
+  const stickRef = useRef(stick)
+  stickRef.current = stick
+  const rafRef = useRef(null)
+  const comparisonIntervalRef = useRef(null)
+  const playfieldRef = useRef(null)
+  const lastPhaseRenderRef = useRef(0)
 
-  // Start full-screen 30s figure-8 test
-  const startTest = useCallback(() => {
-    samplesRef.current = []
-    phaseStartRef.current = Date.now()
-    setGeminiResult(null)
-    setGeminiError(null)
-    setTrackingElapsed(0)
-    setLastComparison(null)
-    setAccuracyHistory([])
-    setTestPhase('running')
-
-    // Sample user position every 0.5s
-    sampleIntervalRef.current = setInterval(() => {
-      const pos = stickRef.current
-      samplesRef.current.push([pos.x, pos.y])
-    }, SAMPLE_INTERVAL_MS)
-
-    // Every 1s: log dot vs target and compute accuracy for chart
-    comparisonIntervalRef.current = setInterval(() => {
-      const elapsed = Date.now() - phaseStartRef.current
-      const target = figure8Position(elapsed)
-      const dot = { x: stickRef.current.x, y: stickRef.current.y }
-      console.log(
-        `[${(elapsed / 1000).toFixed(1)}s] Dot: (${dot.x.toFixed(3)}, ${dot.y.toFixed(
-          3,
-        )})  Target: (${target.x.toFixed(3)}, ${target.y.toFixed(3)})`,
-      )
-      const dist = Math.hypot(dot.x - target.x, dot.y - target.y)
-      const accuracy = Math.max(0, 1 - dist / 2)
-      setLastComparison({ dot, target, elapsed })
-      setAccuracyHistory((prev) => [...prev.slice(1 - maxAccuracyPoints), accuracy])
-    }, 1000)
+  const stopTimers = useCallback(() => {
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null }
+    if (comparisonIntervalRef.current) { clearInterval(comparisonIntervalRef.current); comparisonIntervalRef.current = null }
   }, [])
 
-  // Timer and end condition for running test (throttle UI updates to reduce lag)
-  const lastTrackingRenderRef = useRef(0)
+  // ── Phase loop ────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (testPhase !== 'running') return
-    const start = phaseStartRef.current
-    let raf
+    if (testPhase !== 'resting' && testPhase !== 'running') return
+
+    phaseStartRef.current = performance.now()
+    const duration = testPhase === 'resting' ? REST_DURATION_MS : TRACKING_DURATION_MS
+
+    // Comparison interval (tracking only)
+    if (testPhase === 'running') {
+      comparisonIntervalRef.current = setInterval(() => {
+        const elapsed = performance.now() - phaseStartRef.current
+        const target = figure8Position(elapsed)
+        const dot = stickRef.current
+        const dist = Math.hypot(dot.x - target.x, dot.y - target.y)
+        const accuracy = Math.max(0, 1 - dist / 2)
+        setLastComparison({ dot, target, elapsed })
+        setAccuracyHistory(prev => [...prev.slice(1 - maxAccuracyPoints), accuracy])
+      }, 1000)
+    }
+
     const loop = () => {
-      const elapsed = Date.now() - start
-      if (performance.now() - lastTrackingRenderRef.current >= THROTTLE_MS) {
-        lastTrackingRenderRef.current = performance.now()
-        setTrackingElapsed(elapsed)
+      const elapsed = performance.now() - phaseStartRef.current
+
+      // Sample data at ~60fps
+      const { x, y } = stickRef.current
+      if (testPhase === 'resting') {
+        restFramesRef.current.push([x, y])
+      } else {
+        const target = figure8Position(elapsed)
+        trackFramesRef.current.push({ x, y, tx: target.x, ty: target.y })
       }
-      if (elapsed >= TRACKING_DURATION_MS) {
-        if (sampleIntervalRef.current) {
-          clearInterval(sampleIntervalRef.current)
-          sampleIntervalRef.current = null
+
+      // Throttle UI updates
+      if (performance.now() - lastPhaseRenderRef.current >= THROTTLE_MS) {
+        lastPhaseRenderRef.current = performance.now()
+        setPhaseElapsed(elapsed)
+      }
+
+      if (elapsed >= duration) {
+        stopTimers()
+        if (testPhase === 'resting') {
+          setTestPhase('running')
+        } else {
+          setTestPhase('analyzing')
         }
-        if (comparisonIntervalRef.current) {
-          clearInterval(comparisonIntervalRef.current)
-          comparisonIntervalRef.current = null
-        }
-        setTestPhase('analyzing')
         return
       }
-      rafRef.current = raf = requestAnimationFrame(loop)
-    }
-    rafRef.current = requestAnimationFrame(loop)
-    return () => {
-      if (raf != null) cancelAnimationFrame(raf)
-    }
-  }, [testPhase])
 
-  // When analyzing, POST to backend then show result
+      rafRef.current = requestAnimationFrame(loop)
+    }
+
+    rafRef.current = requestAnimationFrame(loop)
+    return () => stopTimers()
+  }, [testPhase, stopTimers])
+
+  // ── Analysis ──────────────────────────────────────────────────────────────
   useEffect(() => {
     if (testPhase !== 'analyzing') return
-    const data = samplesRef.current
-    const duration_seconds = TRACKING_DURATION_MS / 1000
+
+    const restFrames = restFramesRef.current
+    const trackFrames = trackFramesRef.current
+
+    const xTrack = trackFrames.map(f => f.x)
+    const yTrack = trackFrames.map(f => f.y)
+
+    const sparc = computeSPARC(xTrack, yTrack, SAMPLE_RATE)
+    const submovementRate = computeSubmovementRate(xTrack, yTrack, SAMPLE_RATE)
+    const rmse = computeTrackingRMSE(trackFrames)
+
     fetch(`${API_URL}/analyze`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data, duration_seconds }),
+      body: JSON.stringify({
+        rest: restFrames,
+        tracking: trackFrames,
+        tracking_metrics: { sparc, submovementRate, rmse },
+      }),
     })
-      .then((res) => res.text())
-      .then((text) => {
-        setGeminiResult(text)
+      .then(res => {
+        if (!res.ok) throw new Error(`Server error ${res.status}`)
+        return res.json()
+      })
+      .then(data => {
+        setResult(data)
+        setAnalysisError(null)
         setTestPhase('done')
       })
-      .catch((err) => {
-        setGeminiError(err.message || 'Request failed')
+      .catch(err => {
+        setAnalysisError(err.message || 'Could not reach backend')
         setTestPhase('done')
       })
   }, [testPhase])
+
+  // ── Actions ───────────────────────────────────────────────────────────────
+  const startTest = useCallback(() => {
+    stopTimers()
+    restFramesRef.current = []
+    trackFramesRef.current = []
+    setResult(null)
+    setAnalysisError(null)
+    setPhaseElapsed(0)
+    setLastComparison(null)
+    setAccuracyHistory([])
+    setTestPhase('resting')
+  }, [stopTimers])
+
+  const exitTest = useCallback(() => {
+    stopTimers()
+    setTestPhase('idle')
+  }, [stopTimers])
+
+  // ── Derived values ────────────────────────────────────────────────────────
+  const trackingElapsed = testPhase === 'running' ? phaseElapsed : 0
+  const restElapsed = testPhase === 'resting' ? phaseElapsed : 0
 
   const targetPosition = useMemo(() => {
     if (testPhase !== 'running') return null
     return figure8Position(trackingElapsed)
   }, [testPhase, trackingElapsed])
 
-  // Keep rumble target in sync so the tick loop can read it without re-creating the callback
   rumbleTargetRef.current = targetPosition
-
-  const playfieldRef = useRef(null)
-
-  const handleTestAreaMouseMove = useCallback((e) => {
-    const rect = playfieldRef.current?.getBoundingClientRect()
-    if (!rect) return
-    const x = Math.max(-1, Math.min(1, (e.clientX - rect.left) / rect.width * 2 - 1))
-    const y = Math.max(-1, Math.min(1, 1 - (e.clientY - rect.top) / rect.height * 2))
-    reportMousePosition(x, y)
-  }, [reportMousePosition])
-
-  const handleStickMouseMove = useCallback(
-    (e) => {
-      const rect = e.currentTarget.getBoundingClientRect()
-      const x = (e.clientX - rect.left) / rect.width * 2 - 1
-      const y = 1 - (e.clientY - rect.top) / rect.height * 2
-      reportMousePosition(x, y)
-    },
-    [reportMousePosition]
-  )
-
-  const exitTest = useCallback(() => {
-    if (sampleIntervalRef.current) {
-      clearInterval(sampleIntervalRef.current)
-      sampleIntervalRef.current = null
-    }
-    if (comparisonIntervalRef.current) {
-      clearInterval(comparisonIntervalRef.current)
-      comparisonIntervalRef.current = null
-    }
-    setTestPhase('idle')
-  }, [])
-
-  useEffect(() => {
-    const shouldMove = rec.phase === 'tracking'
-    circleMoving.current = shouldMove
-    setCircleMovingState(shouldMove)
-  }, [rec.phase])
-
-  const isActive = rec.phase === 'resting' || rec.phase === 'tracking' || rec.phase === 'computing'
-
-  const handleArenaMouseMove = useCallback((e) => {
-    const rect = e.currentTarget.getBoundingClientRect()
-    setMouse(
-      (e.clientX - rect.left) / rect.width * 2 - 1,
-      1 - (e.clientY - rect.top) / rect.height * 2
-    )
-  }, [setMouse])
 
   const progress = Math.min(1, trackingElapsed / TRACKING_DURATION_MS)
   const sec = Math.floor(trackingElapsed / 1000)
   const totalSec = TRACKING_DURATION_MS / 1000
+  const restSecsLeft = Math.max(0, Math.ceil((REST_DURATION_MS - restElapsed) / 1000))
 
   const nowAccuracy = lastComparison
-    ? Math.max(
-        0,
-        1 -
-          Math.hypot(
-            lastComparison.dot.x - lastComparison.target.x,
-            lastComparison.dot.y - lastComparison.target.y,
-          ) / 2,
-      )
+    ? Math.max(0, 1 - Math.hypot(lastComparison.dot.x - lastComparison.target.x, lastComparison.dot.y - lastComparison.target.y) / 2)
     : null
+
+  // ── Mouse handlers ────────────────────────────────────────────────────────
+  const handlePlayfieldMouseMove = useCallback((e) => {
+    const rect = playfieldRef.current?.getBoundingClientRect()
+    if (!rect) return
+    setMouse(
+      (e.clientX - rect.left) / rect.width * 2 - 1,
+      1 - (e.clientY - rect.top) / rect.height * 2,
+    )
+  }, [setMouse])
+
+  const handleStickMouseMove = useCallback((e) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    setMouse(
+      (e.clientX - rect.left) / rect.width * 2 - 1,
+      1 - (e.clientY - rect.top) / rect.height * 2,
+    )
+  }, [setMouse])
+
+  const isOverlay = testPhase !== 'idle'
 
   return (
     <div className="dashboard">
       {/* ── TEST OVERLAY ── */}
-      {(testPhase === 'running' || testPhase === 'analyzing' || testPhase === 'done') && (
-        <div className={`test-overlay ${testPhase}`} ref={testAreaRef}>
+      {isOverlay && (
+        <div className={`test-overlay ${testPhase}`}>
 
+          {/* REST PHASE */}
+          {testPhase === 'resting' && (
+            <div className="test-analyzing">
+              <div className="analyzing-spinner" />
+              <div className="analyzing-text">
+                Hold <strong>completely still</strong> — {restSecsLeft}s remaining
+              </div>
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '0.5rem' }}>
+                Rest your hand. Do not move the controller or mouse.
+              </div>
+            </div>
+          )}
+
+          {/* TRACKING PHASE */}
           {testPhase === 'running' && (
             <>
               {/* HUD bar */}
@@ -459,13 +370,7 @@ export default function App() {
                 )}
                 <div className="test-timer">
                   {sec}s
-                  <span
-                    style={{
-                      color: 'var(--text-dim)',
-                      fontSize: '1rem',
-                      fontWeight: 400,
-                    }}
-                  >
+                  <span style={{ color: 'var(--text-dim)', fontSize: '1rem', fontWeight: 400 }}>
                     /{totalSec}
                   </span>
                 </div>
@@ -473,8 +378,8 @@ export default function App() {
 
               {/* Instruction */}
               <div className="test-instruction-bar">
-                Follow the <strong style={{color:'#fff'}}>white ring</strong> — keep your{' '}
-                <strong style={{color:'var(--cyan)'}}>cyan dot</strong> as close to it as possible
+                Follow the <strong style={{ color: '#fff' }}>white ring</strong> — keep your{' '}
+                <strong style={{ color: 'var(--cyan)' }}>cyan dot</strong> as close to it as possible
               </div>
 
               {/* Mini accuracy chart */}
@@ -512,8 +417,8 @@ export default function App() {
               <div
                 className="test-playfield"
                 ref={(el) => { playfieldRef.current = el; rumblePlayfieldRef.current = el }}
-                onMouseMove={handleTestAreaMouseMove}
-                onMouseLeave={() => reportMousePosition(0, 0)}
+                onMouseMove={handlePlayfieldMouseMove}
+                onMouseLeave={() => setMouse(0, 0)}
               >
                 <div
                   className="test-target-dot"
@@ -533,6 +438,7 @@ export default function App() {
             </>
           )}
 
+          {/* ANALYZING */}
           {testPhase === 'analyzing' && (
             <div className="test-analyzing">
               <div className="analyzing-spinner" />
@@ -540,6 +446,7 @@ export default function App() {
             </div>
           )}
 
+          {/* RESULTS */}
           {testPhase === 'done' && (
             <div className="test-done-panel">
               <div className="results-card">
@@ -547,18 +454,16 @@ export default function App() {
                   <div className="results-card-icon">🧠</div>
                   <div>
                     <p className="results-card-title">Analysis Complete</p>
-                    <p className="results-card-subtitle">Gemini tremor-pattern feedback</p>
+                    <p className="results-card-subtitle">Tremor biomarker screening results</p>
                   </div>
                 </div>
                 <div className="results-card-body">
-                  {geminiError && (
+                  {analysisError && (
                     <div className="test-error">
-                      ⚠ {geminiError} — is the backend running on <code>{API_URL}</code>?
+                      ⚠ {analysisError} — is the backend running on <code>{API_URL}</code>?
                     </div>
                   )}
-                  {geminiResult && (
-                    <pre className="test-gemini-result">{geminiResult}</pre>
-                  )}
+                  {result && <ResultCard result={result} />}
                   <button type="button" className="btn-done" onClick={exitTest}>
                     ← Back to dashboard
                   </button>
@@ -585,19 +490,19 @@ export default function App() {
           <div className="hero-eyebrow">Neuromotor Screening Tool</div>
           <h2>Track your tremor.<br /><span>Know your baseline.</span></h2>
           <p className="hero-sub">
-            A 30-second movement test that uses your mouse or gamepad to detect
-            tremor patterns. Your data is analyzed by Gemini AI against clinical biomarkers.
+            A 35-second movement test (5s rest + 30s tracking) that uses your mouse or gamepad
+            to detect tremor patterns. Your data is analyzed by Gemini AI against 8 clinical biomarkers.
           </p>
         </div>
 
         <button type="button" className="btn-primary" onClick={startTest}>
           <span className="btn-primary-icon">▶</span>
-          Start 30s Tracking Test
+          Start Test (5s rest + 30s tracking)
         </button>
 
         <div className="stats-row">
           <div className="stat-cell">
-            <span className="stat-value">30s</span>
+            <span className="stat-value">35s</span>
             <span className="stat-label">Test Duration</span>
           </div>
           <div className="stat-cell">
@@ -605,8 +510,8 @@ export default function App() {
             <span className="stat-label">PD Signature</span>
           </div>
           <div className="stat-cell">
-            <span className="stat-value">120Hz</span>
-            <span className="stat-label">Sample Rate</span>
+            <span className="stat-value">8</span>
+            <span className="stat-label">Biomarkers</span>
           </div>
         </div>
 
@@ -619,7 +524,7 @@ export default function App() {
             <div
               className="stick-viz stick-viz-small"
               onMouseMove={handleStickMouseMove}
-              onMouseLeave={() => reportMousePosition(0, 0)}
+              onMouseLeave={() => setMouse(0, 0)}
               role="img"
               aria-label="Input preview"
             >
@@ -635,7 +540,7 @@ export default function App() {
             <p className="check-card-hint">
               <strong>{usingMouse ? '🖱 Mouse detected' : '🎮 Controller detected'}</strong><br />
               {usingMouse
-                ? 'Move your mouse over this circle — if the dot tracks, you\'re ready.'
+                ? "Move your mouse over this circle — if the dot tracks, you're ready."
                 : 'Use your left stick to move the dot. Full range recommended.'}
             </p>
           </div>
@@ -644,7 +549,7 @@ export default function App() {
         <div className="dashboard-disclaimer">
           <span className="disclaimer-icon">⚠</span>
           <span>
-            This tool is for <strong style={{color:'var(--text-muted)'}}>awareness screening only</strong> and
+            This tool is for <strong style={{ color: 'var(--text-muted)' }}>awareness screening only</strong> and
             is not a medical diagnosis. Consult a qualified neurologist if you have concerns about tremor or movement disorders.
           </span>
         </div>
