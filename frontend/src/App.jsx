@@ -13,6 +13,11 @@ const THROTTLE_MS = 33 // ~30fps UI updates to reduce lag (data still sampled at
 const TRACKING_SENSITIVITY = 0.5 // 0–1: lower = less movement of your dot for same mouse/stick input
 const CONTROLLER_RANGE_SCALE = 2.2 // scale stick so limited physical radius still reaches full area (then clamp to ±1)
 
+const RUMBLE_DEAD_ZONE = 0.12   // no rumble within this distance of target
+const RUMBLE_THRESHOLD = 0.30   // rumble starts here, grows to full at max dist (~1.4)
+const RUMBLE_DURATION_MIN = 20  // ms at low intensity
+const RUMBLE_DURATION_MAX = 120 // ms at full intensity
+
 function useGamepadSlidingWindow() {
   const [stick, setStick] = useState({ x: 0, y: 0 })
   const [spectrum, setSpectrum] = useState(() => Array(20).fill(0))
@@ -24,6 +29,10 @@ function useGamepadSlidingWindow() {
   const mouseRef = useRef({ x: 0, y: 0 })
   const lastRenderRef = useRef(0)
   const pendingStickRef = useRef({ x: 0, y: 0 })
+  // Set to current target position during test, null otherwise
+  const rumbleTargetRef = useRef(null)
+  // Set to the playfield DOM element so tick can compute dot size in normalized coords
+  const rumblePlayfieldRef = useRef(null)
 
   useEffect(() => {
     const onConnect = () => setUsingMouse(false)
@@ -60,6 +69,29 @@ function useGamepadSlidingWindow() {
       y = mouseRef.current.y
     }
     pendingStickRef.current = { x, y }
+
+    // Haptic feedback: scales smoothly with distance — silent on the dot, strong when far
+    if (pad?.vibrationActuator && rumbleTargetRef.current) {
+      const target = rumbleTargetRef.current
+      const dist = Math.hypot(x - target.x, y - target.y)
+      // Compute dead zone = visual radius of the target dot (16px) in normalized coords.
+      // The playfield maps its full width to [-1, 1], and dots travel ±45% of that.
+      // normalized_radius = (dot_px_radius / playfield_px_width) * 2
+      const pfW = rumblePlayfieldRef.current?.offsetWidth ?? 800
+      const dotDeadZone = (16 / pfW) * 2   // 16px = half of 32px target dot
+      if (dist > dotDeadZone) {
+        // ramp from 0 just outside dot to 1 at max distance (~1.41 diagonal)
+        const t = Math.min(1, Math.max(0, (dist - RUMBLE_THRESHOLD) / (1.41 - RUMBLE_THRESHOLD)))
+        const duration = Math.round(RUMBLE_DURATION_MIN + t * (RUMBLE_DURATION_MAX - RUMBLE_DURATION_MIN))
+        pad.vibrationActuator.playEffect('dual-rumble', {
+          startDelay: 0,
+          duration,
+          weakMagnitude: t * 0.7,
+          strongMagnitude: t * 0.45,
+        }).catch(() => {})
+      }
+    }
+
     const buf = bufferRef.current
     buf.push(x)
     if (buf.length > WINDOW_FRAMES) buf.shift()
@@ -89,7 +121,7 @@ function useGamepadSlidingWindow() {
     }
   }, [tick])
 
-  return { stick, spectrum, dominantInPD, bufferLength, usingMouse, reportMousePosition, clearBuffer }
+  return { stick, spectrum, dominantInPD, bufferLength, usingMouse, reportMousePosition, clearBuffer, rumbleTargetRef, rumblePlayfieldRef }
 }
 
 function useTestMode() {
@@ -147,7 +179,7 @@ function figure8Position(elapsedMs) {
 }
 
 export default function App() {
-  const { stick, spectrum, dominantInPD, bufferLength, usingMouse, reportMousePosition, clearBuffer } =
+  const { stick, spectrum, dominantInPD, bufferLength, usingMouse, reportMousePosition, clearBuffer, rumbleTargetRef, rumblePlayfieldRef } =
     useGamepadSlidingWindow()
   const test = useTestMode()
 
@@ -255,11 +287,16 @@ export default function App() {
     return figure8Position(trackingElapsed)
   }, [testPhase, trackingElapsed])
 
+  // Keep rumble target in sync so the tick loop can read it without re-creating the callback
+  rumbleTargetRef.current = targetPosition
+
+  const playfieldRef = useRef(null)
+
   const handleTestAreaMouseMove = useCallback((e) => {
-    const rect = testAreaRef.current?.getBoundingClientRect()
+    const rect = playfieldRef.current?.getBoundingClientRect()
     if (!rect) return
-    const x = (e.clientX - rect.left) / rect.width * 2 - 1
-    const y = 1 - (e.clientY - rect.top) / rect.height * 2
+    const x = Math.max(-1, Math.min(1, (e.clientX - rect.left) / rect.width * 2 - 1))
+    const y = Math.max(-1, Math.min(1, 1 - (e.clientY - rect.top) / rect.height * 2))
     reportMousePosition(x, y)
   }, [reportMousePosition])
 
@@ -293,153 +330,220 @@ export default function App() {
   const sec = Math.floor(trackingElapsed / 1000)
   const totalSec = TRACKING_DURATION_MS / 1000
 
+  const nowAccuracy = lastComparison
+    ? Math.max(0, 1 - Math.hypot(
+        lastComparison.cursor.x - lastComparison.target.x,
+        lastComparison.cursor.y - lastComparison.target.y
+      ) / 2)
+    : null
+
   return (
     <div className="dashboard">
-      {/* Full-screen tracking test overlay */}
+      {/* ── TEST OVERLAY ── */}
       {(testPhase === 'running' || testPhase === 'analyzing' || testPhase === 'done') && (
-        <div
-          className={`test-overlay ${testPhase}`}
-          ref={testAreaRef}
-          onMouseMove={testPhase === 'running' ? handleTestAreaMouseMove : undefined}
-        >
+        <div className={`test-overlay ${testPhase}`} ref={testAreaRef}>
+
           {testPhase === 'running' && (
             <>
-              <div className="test-instruction">
-                Follow the white dot. Test runs 30 seconds. Your position is sampled every 0.5s.
-              </div>
-              <div className="test-timer">
-                {sec}s / {totalSec}s
-              </div>
-              <div className="test-progress-bar">
-                <div className="test-progress-fill" style={{ width: `${progress * 100}%` }} />
-              </div>
-              {lastComparison && (
-                <div className="test-coords">
-                  Cursor: ({lastComparison.cursor.x.toFixed(2)}, {lastComparison.cursor.y.toFixed(2)})
-                  {'  ·  '}
-                  Target: ({lastComparison.target.x.toFixed(2)}, {lastComparison.target.y.toFixed(2)})
+              {/* HUD bar */}
+              <div className="test-hud">
+                <span className="test-hud-title">TremorCheck &middot; Live Test</span>
+                <div className="test-progress-track">
+                  <div className="test-progress-fill" style={{ width: `${progress * 100}%` }} />
                 </div>
-              )}
-              {accuracyHistory.length > 0 && (
-                <div className="test-accuracy-chart">
-                  <div className="test-accuracy-label">
-                    Accuracy over time (each point = 1s, not cumulative) — {lastComparison ? (Math.max(0, 1 - Math.hypot(lastComparison.cursor.x - lastComparison.target.x, lastComparison.cursor.y - lastComparison.target.y) / 2) * 100).toFixed(0) : 0}% now
+                {nowAccuracy !== null && (
+                  <div className="test-accuracy-pill">
+                    ◎ {(nowAccuracy * 100).toFixed(0)}%
                   </div>
-                  <svg className="test-accuracy-line-chart" viewBox="0 0 360 56" preserveAspectRatio="none">
+                )}
+                <div className="test-timer">{sec}s<span style={{color:'var(--text-dim)',fontSize:'1rem',fontWeight:400}}>/{totalSec}</span></div>
+              </div>
+
+              {/* Instruction */}
+              <div className="test-instruction-bar">
+                Follow the <strong style={{color:'#fff'}}>white ring</strong> — keep your{' '}
+                <strong style={{color:'var(--cyan)'}}>cyan dot</strong> as close to it as possible
+              </div>
+
+              {/* Mini accuracy chart */}
+              {accuracyHistory.length > 1 && (
+                <div className="test-chart-bar">
+                  <svg className="test-accuracy-line-chart" viewBox="0 0 800 44" preserveAspectRatio="none">
                     {(() => {
-                      const w = 360
-                      const h = 52
+                      const w = 800, h = 40
                       const n = accuracyHistory.length
-                      const points = accuracyHistory.map((a, i) => {
-                        const x = n > 1 ? (i / (n - 1)) * w : 0
-                        const y = h * (1 - a)
-                        return `${x},${y}`
+                      const pts = accuracyHistory.map((a, i) => {
+                        const px = n > 1 ? (i / (n - 1)) * w : 0
+                        const py = h * (1 - a) + 2
+                        return `${px},${py}`
                       }).join(' ')
+                      const fillPts = `0,${h + 2} ${pts} ${w},${h + 2}`
                       return (
                         <>
-                          <polyline
-                            fill="none"
-                            stroke="var(--cyan)"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            points={points}
-                          />
+                          <defs>
+                            <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor="var(--cyan)" stopOpacity="0.18" />
+                              <stop offset="100%" stopColor="var(--cyan)" stopOpacity="0" />
+                            </linearGradient>
+                          </defs>
+                          <polygon fill="url(#chartFill)" points={fillPts} />
+                          <polyline fill="none" stroke="var(--cyan)" strokeWidth="1.5"
+                            strokeLinecap="round" strokeLinejoin="round" points={pts} />
                         </>
                       )
                     })()}
                   </svg>
                 </div>
               )}
-              <div className="test-playfield">
+
+              {/* Playfield */}
+              <div
+                className="test-playfield"
+                ref={(el) => { playfieldRef.current = el; rumblePlayfieldRef.current = el }}
+                onMouseMove={handleTestAreaMouseMove}
+                onMouseLeave={() => reportMousePosition(0, 0)}
+              >
                 <div
                   className="test-target-dot"
                   style={{
                     left: `${50 + (targetPosition?.x ?? 0) * 45}%`,
-                    top: `${50 - (targetPosition?.y ?? 0) * 45}%`,
+                    top:  `${50 - (targetPosition?.y ?? 0) * 45}%`,
                   }}
                 />
                 <div
                   className="test-user-dot"
                   style={{
-                    left: `${50 + stick.x * 45 * TRACKING_SENSITIVITY}%`,
-                    top: `${50 - stick.y * 45 * TRACKING_SENSITIVITY}%`,
+                    left: `${Math.max(2, Math.min(98, 50 + stick.x * 45 * TRACKING_SENSITIVITY))}%`,
+                    top:  `${Math.max(2, Math.min(98, 50 - stick.y * 45 * TRACKING_SENSITIVITY))}%`,
                   }}
                 />
               </div>
             </>
           )}
+
           {testPhase === 'analyzing' && (
-            <div className="test-analyzing">Analyzing with Gemini…</div>
+            <div className="test-analyzing">
+              <div className="analyzing-spinner" />
+              <div className="analyzing-text">Analyzing with <strong>Gemini</strong>…</div>
+            </div>
           )}
+
           {testPhase === 'done' && (
             <div className="test-done-panel">
-              <h2>Tracking test complete</h2>
-              {geminiError && (
-                <p className="test-error">Error: {geminiError}. Is the backend running on {API_URL}?</p>
-              )}
-              {geminiResult && (
-                <pre className="test-gemini-result">{geminiResult}</pre>
-              )}
-              <button type="button" className="btn btn-done" onClick={exitTest}>
-                Back to dashboard
-              </button>
+              <div className="results-card">
+                <div className="results-card-header">
+                  <div className="results-card-icon">🧠</div>
+                  <div>
+                    <p className="results-card-title">Analysis Complete</p>
+                    <p className="results-card-subtitle">Gemini tremor-pattern feedback</p>
+                  </div>
+                </div>
+                <div className="results-card-body">
+                  {geminiError && (
+                    <div className="test-error">
+                      ⚠ {geminiError} — is the backend running on <code>{API_URL}</code>?
+                    </div>
+                  )}
+                  {geminiResult && (
+                    <pre className="test-gemini-result">{geminiResult}</pre>
+                  )}
+                  <button type="button" className="btn-done" onClick={exitTest}>
+                    ← Back to dashboard
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </div>
       )}
 
+      {/* ── HEADER ── */}
       <header className="header">
-        <h1>TremorCheck AI</h1>
-        <span className="subtitle">Tracking test · tremor-aware feedback</span>
+        <div className="header-logo">⚡</div>
+        <div className="header-text">
+          <h1>TremorCheck AI</h1>
+          <span className="subtitle">Motor-pattern screening via movement analysis</span>
+        </div>
+        <span className="header-badge">BETA</span>
       </header>
 
+      {/* ── MAIN ── */}
       <main className="dashboard-main">
-        <p className="dashboard-intro">
-          Run the 30-second tracking test: follow the moving dot with your controller or mouse.
-          We record your position every 0.5s and send it to Gemini for tremor-related feedback.
-        </p>
-        <button type="button" className="btn btn-start-test btn-primary" onClick={startTest}>
-          Start 30s tracking test
+        <div className="hero">
+          <div className="hero-eyebrow">Neuromotor Screening Tool</div>
+          <h2>Track your tremor.<br /><span>Know your baseline.</span></h2>
+          <p className="hero-sub">
+            A 30-second movement test that uses your mouse or gamepad to detect
+            tremor patterns. Your data is analyzed by Gemini AI against clinical biomarkers.
+          </p>
+        </div>
+
+        <button type="button" className="btn-primary" onClick={startTest}>
+          <span className="btn-primary-icon">▶</span>
+          Start 30s Tracking Test
         </button>
-        <div className="dashboard-check">
-          <span className="dashboard-check-label">Input check</span>
-          <div
-            className="stick-viz stick-viz-small"
-            onMouseMove={handleStickMouseMove}
-            onMouseLeave={() => reportMousePosition(0, 0)}
-            role="img"
-            aria-label="Input preview"
-          >
-            <div className="stick-base" />
-            <div
-              className="stick-dot"
-              style={{
-                left: `calc(50% + ${stick.x * 38}%)`,
-                top: `calc(50% - ${stick.y * 38}%)`,
-              }}
-            />
+
+        <div className="stats-row">
+          <div className="stat-cell">
+            <span className="stat-value">30s</span>
+            <span className="stat-label">Test Duration</span>
           </div>
-          <span className="dashboard-check-hint">
-            {usingMouse ? 'Mouse: move in circle' : 'Controller: left stick'} — if this moves, you’re good to go.
+          <div className="stat-cell">
+            <span className="stat-value">4–6Hz</span>
+            <span className="stat-label">PD Signature</span>
+          </div>
+          <div className="stat-cell">
+            <span className="stat-value">120Hz</span>
+            <span className="stat-label">Sample Rate</span>
+          </div>
+        </div>
+
+        <div className="dashboard-check-card">
+          <div className="check-card-header">
+            <div className="check-card-dot" />
+            <span className="check-card-title">Input Check</span>
+          </div>
+          <div className="check-card-body">
+            <div
+              className="stick-viz stick-viz-small"
+              onMouseMove={handleStickMouseMove}
+              onMouseLeave={() => reportMousePosition(0, 0)}
+              role="img"
+              aria-label="Input preview"
+            >
+              <div className="stick-base" />
+              <div
+                className="stick-dot"
+                style={{
+                  left: `calc(50% + ${stick.x * 38}%)`,
+                  top:  `calc(50% - ${stick.y * 38}%)`,
+                }}
+              />
+            </div>
+            <p className="check-card-hint">
+              <strong>{usingMouse ? '🖱 Mouse detected' : '🎮 Controller detected'}</strong><br />
+              {usingMouse
+                ? 'Move your mouse over this circle — if the dot tracks, you\'re ready.'
+                : 'Use your left stick to move the dot. Full range recommended.'}
+            </p>
+          </div>
+        </div>
+
+        <div className="dashboard-disclaimer">
+          <span className="disclaimer-icon">⚠</span>
+          <span>
+            This tool is for <strong style={{color:'var(--text-muted)'}}>awareness screening only</strong> and
+            is not a medical diagnosis. Consult a qualified neurologist if you have concerns about tremor or movement disorders.
           </span>
         </div>
-        <p className="dashboard-about">
-          During the test you’ll see an accuracy chart (how close you are to the target). After 30s, your data is analyzed and you’ll get a short report. This is for awareness only — not a medical diagnosis.
-        </p>
       </main>
 
+      {/* ── FOOTER ── */}
       <footer className="research-footer">
-        <strong>Research Reference:</strong> The 4–6 Hz resting tremor frequency is established as
-        a primary biomarker for Parkinson&apos;s Disease (as per{' '}
-        <a
-          href="https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12635349/"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
+        <strong>Research:</strong> 4–6 Hz resting tremor is a primary PD biomarker per{' '}
+        <a href="https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12635349/" target="_blank" rel="noopener noreferrer">
           PMC12635349
-        </a>
-        {' '}and related clinical literature).
+        </a>{' '}and related clinical literature.
       </footer>
     </div>
   )

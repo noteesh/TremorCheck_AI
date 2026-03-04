@@ -48,8 +48,8 @@ EVIDENCE BASE:
    is considered 'clinically significant jitter' for awareness screening.
 """
 
-prompt = f"""
-You are an Evidence-Based Research Agent. 
+    prompt = f"""
+You are an Evidence-Based Research Agent.
 {evidence_context}
 
 USER DATA FROM JOYSTICK:
@@ -57,8 +57,8 @@ USER DATA FROM JOYSTICK:
 - Movement Intensity (StdDev): {intensity:.4f}
 
 TASK:
-Evaluate the user's tremor profile EXCLUSIVELY against the EVIDENCE BASE provided above. 
-Do not use outside knowledge. 
+Evaluate the user's tremor profile EXCLUSIVELY against the EVIDENCE BASE provided above.
+Do not use outside knowledge.
 
 Return a JSON object:
 {{
@@ -68,10 +68,10 @@ Return a JSON object:
   "behavioral_nudge": "A low-stakes health awareness action"
 }}
 
-STRICT RULE: If the frequency is outside 3-15 Hz, set likelihood to 0% and state 
+STRICT RULE: If the frequency is outside 3-15 Hz, set likelihood to 0% and state
 'Data inconsistent with known neurological tremor signatures'.
 """
-    
+
     response = model.generate_content(prompt)
     # Note: In a hackathon, use a simple string replace if JSON format is messy
     return response.text
