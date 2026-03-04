@@ -277,6 +277,7 @@
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-muted);
+  min-height: 1.1em;
 }
 
 .check-card-body {
@@ -364,8 +365,28 @@
   transform: translateY(-50%);
 }
 
-.stick-dot {
+.target-circle {
   position: absolute;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border-radius: 50%;
+  border: 2.5px solid var(--cyan);
+  background: transparent;
+  box-shadow: 0 0 10px var(--cyan-glow);
+  transition: left 0.05s linear, top 0.05s linear;
+}
+
+.target-circle.active {
+  background: rgba(0, 212, 170, 0.12);
+  box-shadow: 0 0 18px var(--cyan-glow);
+}
+
+.user-dot {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
   width: 14px;
   height: 14px;
   margin: -7px 0 0 -7px;

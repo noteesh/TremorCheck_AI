@@ -7,7 +7,6 @@ function nextPow2(n) {
 
 /**
  * Radix-2 FFT for real signals. Zero-pads to power of 2. Returns magnitude spectrum.
- * With 120 samples zero-padded to 128, sample rate 60 Hz => bin k = k * (60/128) Hz.
  */
 function fftReal(signal) {
   if (signal.length === 0) return []
@@ -74,7 +73,7 @@ function swap(arr, a, b) {
   arr[b] = t
 }
 
-/** Zero-pads to next power of 2; with 120 samples -> N=128, bin k = k * (60/128) Hz. */
+/** Zero-pads to next power of 2; returns magnitude array for 1–20 Hz bins. */
 export function getMagnitudeSpectrum1To20Hz(signal, sampleRate = 60) {
   if (signal.length < 2) return new Array(20).fill(0)
   const N = nextPow2(signal.length)
@@ -112,4 +111,151 @@ export function isDominantInRange(spectrum1To20, lowHz = 4, highHz = 6) {
     }
   }
   return globalPeakHz >= lowHz && globalPeakHz <= highHz
+}
+
+/**
+ * Simple low-pass filter (1st-order IIR) to smooth a signal before differentiation.
+ * alpha = cutoff / (cutoff + sampleRate / (2*PI)) — simplified RC filter.
+ */
+function lowPassFilter(signal, alpha = 0.2) {
+  const out = new Array(signal.length)
+  out[0] = signal[0]
+  for (let i = 1; i < signal.length; i++) {
+    out[i] = alpha * signal[i] + (1 - alpha) * out[i - 1]
+  }
+  return out
+}
+
+/**
+ * Compute velocity (1st derivative) and jerk (3rd derivative) of a position signal.
+ * Uses central differences for better accuracy.
+ */
+function derivatives(signal, dt) {
+  const n = signal.length
+  const vel = new Array(n).fill(0)
+  const acc = new Array(n).fill(0)
+  const jerk = new Array(n).fill(0)
+
+  for (let i = 1; i < n - 1; i++) vel[i] = (signal[i + 1] - signal[i - 1]) / (2 * dt)
+  vel[0] = vel[1]
+  vel[n - 1] = vel[n - 2]
+
+  for (let i = 1; i < n - 1; i++) acc[i] = (vel[i + 1] - vel[i - 1]) / (2 * dt)
+  acc[0] = acc[1]
+  acc[n - 1] = acc[n - 2]
+
+  for (let i = 1; i < n - 1; i++) jerk[i] = (acc[i + 1] - acc[i - 1]) / (2 * dt)
+  jerk[0] = jerk[1]
+  jerk[n - 1] = jerk[n - 2]
+
+  return { vel, acc, jerk }
+}
+
+/**
+ * Submovement rate: velocity zero-crossings per second.
+ * Each zero-crossing of velocity = one micro-corrective movement.
+ * PD: ~1.67/s, healthy controls: ~1.36/s (Patel et al. 2025, PMC11884197).
+ *
+ * @param {number[]} xSignal - X position over time
+ * @param {number[]} ySignal - Y position over time
+ * @param {number} sampleRate - samples per second
+ * @returns {number} submovements per second
+ */
+export function computeSubmovementRate(xSignal, ySignal, sampleRate = 60) {
+  if (xSignal.length < 4) return 0
+  const dt = 1 / sampleRate
+
+  // Smooth before differentiating to suppress noise
+  const xSmooth = lowPassFilter(xSignal, 0.25)
+  const ySmooth = lowPassFilter(ySignal, 0.25)
+
+  const { vel: vx } = derivatives(xSmooth, dt)
+  const { vel: vy } = derivatives(ySmooth, dt)
+
+  // Speed = vector magnitude of velocity
+  const speed = vx.map((v, i) => Math.sqrt(v * v + vy[i] * vy[i]))
+
+  // Count zero-crossings of speed (local minima ≈ direction reversals)
+  let crossings = 0
+  for (let i = 1; i < speed.length - 1; i++) {
+    if (speed[i - 1] > speed[i] && speed[i] < speed[i + 1]) crossings++
+  }
+
+  const durationSeconds = xSignal.length / sampleRate
+  return crossings / durationSeconds
+}
+
+/**
+ * SPARC (Spectral Arc Length) — movement smoothness metric.
+ * More negative = less smooth = more PD-like.
+ * Healthy: ~-5.17, PD ON: ~-6.11, PD OFF: ~-6.74 (Beck et al. 2018, PMC6006701).
+ *
+ * Algorithm: arc length of the normalized speed FFT magnitude spectrum
+ * up to the frequency where spectrum falls below 5% of max or 20 Hz.
+ *
+ * @param {number[]} xSignal - X position
+ * @param {number[]} ySignal - Y position
+ * @param {number} sampleRate
+ * @returns {number} SPARC value (negative, closer to 0 = smoother)
+ */
+export function computeSPARC(xSignal, ySignal, sampleRate = 60) {
+  if (xSignal.length < 8) return 0
+  const dt = 1 / sampleRate
+
+  const xSmooth = lowPassFilter(xSignal, 0.3)
+  const ySmooth = lowPassFilter(ySignal, 0.3)
+
+  const { vel: vx } = derivatives(xSmooth, dt)
+  const { vel: vy } = derivatives(ySmooth, dt)
+
+  const speed = vx.map((v, i) => Math.sqrt(v * v + vy[i] * vy[i]))
+
+  // FFT of speed
+  const N = nextPow2(speed.length)
+  const mag = fftReal(speed)  // magnitude spectrum
+
+  const maxMag = Math.max(...mag.slice(0, N / 2 + 1))
+  if (maxMag === 0) return 0
+
+  // Normalized spectrum and frequency axis
+  const binWidth = sampleRate / N
+  const freqCutoff = 20 // Hz
+
+  // Find cutoff bin: stop where normalized mag < 0.05 or freq > freqCutoff
+  let cutoffBin = mag.length - 1
+  for (let k = 1; k < mag.length; k++) {
+    if ((k * binWidth) > freqCutoff || (mag[k] / maxMag) < 0.05) {
+      cutoffBin = k
+      break
+    }
+  }
+
+  // Compute arc length of normalized magnitude spectrum
+  // SPARC = -integral sqrt(1 + (dV/dw)^2) dw
+  let arcLength = 0
+  for (let k = 1; k <= cutoffBin; k++) {
+    const v0 = mag[k - 1] / maxMag
+    const v1 = mag[k] / maxMag
+    const dv = v1 - v0
+    arcLength += Math.sqrt(binWidth * binWidth + dv * dv)
+  }
+
+  return -arcLength
+}
+
+/**
+ * Tracking RMSE: root mean square distance from cursor to target per frame.
+ * PD: ~0.389 normalized units, healthy: ~0.265 (Patel et al. 2025, PMC11884197).
+ *
+ * @param {Array<{x,y,tx,ty}>} frames
+ * @returns {number}
+ */
+export function computeTrackingRMSE(frames) {
+  if (!frames.length) return 0
+  const sumSq = frames.reduce((acc, f) => {
+    const dx = f.x - f.tx
+    const dy = f.y - f.ty
+    return acc + dx * dx + dy * dy
+  }, 0)
+  return Math.sqrt(sumSq / frames.length)
 }

@@ -2,5 +2,5 @@ flask
 flask-cors
 numpy
 scipy
-google-generativeai
+google-genai
 python-dotenv

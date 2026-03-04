@@ -51,7 +51,7 @@ function useGamepadSlidingWindow() {
     }
   }, [])
 
-  const reportMousePosition = useCallback((x, y) => {
+  const setMouse = useCallback((x, y) => {
     mouseRef.current = {
       x: Math.max(-1, Math.min(1, x)),
       y: Math.max(-1, Math.min(1, y)),
@@ -159,23 +159,76 @@ function useTestMode() {
   const [activeSpectrum, setActiveSpectrum] = useState(null)
   const latestRef = useRef({ spectrum: null, dominantInPD: false })
 
-  const captureRest = useCallback(() => {
-    const { spectrum, dominantInPD } = latestRef.current
-    if (spectrum) {
-      setRestSpectrum([...spectrum])
-      setRestFreqInPD(!!dominantInPD)
-    }
-  }, [])
-  const captureActive = useCallback(() => {
-    const { spectrum, dominantInPD } = latestRef.current
-    if (spectrum) {
-      setActiveSpectrum([...spectrum])
-      setActiveFreqInPD(!!dominantInPD)
-    }
+  const clearTimers = () => {
+    timersRef.current.forEach((id) => clearInterval(id))
+    timersRef.current = []
+  }
+
+  // Shared capture helper — samples stickRef every 1/60s for `duration` seconds
+  const runCapture = useCallback((duration, onFrame, onDone) => {
+    let remaining = duration
+    setTimeLeft(duration)
+
+    const sampleTimer = setInterval(() => {
+      onFrame()
+    }, 1000 / SAMPLE_RATE)
+
+    const countTimer = setInterval(() => {
+      remaining -= 1
+      setTimeLeft(remaining)
+      if (remaining <= 0) {
+        clearInterval(sampleTimer)
+        clearInterval(countTimer)
+        timersRef.current = []
+        onDone()
+      }
+    }, 1000)
+
+    timersRef.current = [sampleTimer, countTimer]
   }, [])
 
-  const updateLatest = useCallback((spectrum, dominantInPD) => {
-    latestRef.current = { spectrum, dominantInPD }
+  const startTest = useCallback(() => {
+    clearTimers()
+    restFramesRef.current = []
+    trackFramesRef.current = []
+    setResult(null)
+    setPhase('resting')
+
+    // Phase 1: rest
+    runCapture(
+      REST_DURATION,
+      () => {
+        const { x, y } = stickRef.current
+        restFramesRef.current.push([x, y])
+      },
+      () => {
+        // Phase 2: tracking
+        setPhase('tracking')
+        runCapture(
+          TRACK_DURATION,
+          () => {
+            const { x, y } = stickRef.current
+            const { x: tx, y: ty } = targetRef.current
+            trackFramesRef.current.push({ x, y, tx, ty })
+          },
+          () => {
+            setPhase('computing')
+            // Compute frontend metrics then send to backend
+            sendToBackend(restFramesRef.current, trackFramesRef.current, setResult, setLoading)
+              .then(() => setPhase('done'))
+          }
+        )
+      }
+    )
+  }, [stickRef, targetRef, runCapture])
+
+  const reset = useCallback(() => {
+    clearTimers()
+    setPhase('idle')
+    setResult(null)
+    setLoading(false)
+    restFramesRef.current = []
+    trackFramesRef.current = []
   }, [])
 
   const verdict =
@@ -355,8 +408,20 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    if (bufferLength >= WINDOW_FRAMES) test.updateLatest(spectrum, dominantInPD)
-  }, [bufferLength, spectrum, dominantInPD, test.updateLatest])
+    const shouldMove = rec.phase === 'tracking'
+    circleMoving.current = shouldMove
+    setCircleMovingState(shouldMove)
+  }, [rec.phase])
+
+  const isActive = rec.phase === 'resting' || rec.phase === 'tracking' || rec.phase === 'computing'
+
+  const handleArenaMouseMove = useCallback((e) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    setMouse(
+      (e.clientX - rect.left) / rect.width * 2 - 1,
+      1 - (e.clientY - rect.top) / rect.height * 2
+    )
+  }, [setMouse])
 
   const progress = Math.min(1, trackingElapsed / TRACKING_DURATION_MS)
   const sec = Math.floor(trackingElapsed / 1000)
@@ -592,6 +657,101 @@ export default function App() {
           PMC12635349
         </a>{' '}and related clinical literature.
       </footer>
+    </div>
+  )
+}
+
+// ─── Results card ─────────────────────────────────────────────────────────────
+function ResultCard({ result }) {
+  if (result.error) return <div className="verdict error">{result.error}</div>
+
+  const m = result.metrics
+  const ai = result.ai_analysis
+  const tm = result.tracking_metrics
+
+  return (
+    <div className="result-card">
+      <p className="result-section-label">Rest biomarkers</p>
+      <div className="metrics-grid">
+        <Metric
+          label="Dominant freq"
+          value={`${m?.rest?.dominant_freq?.toFixed(2)} Hz`}
+          note="PD: 4–6 Hz"
+          flag={m?.rest?.dominant_freq >= 3.5 && m?.rest?.dominant_freq <= 7.5}
+        />
+        <Metric
+          label="TSI"
+          value={m?.rest?.tsi != null ? m.rest.tsi.toFixed(3) : '—'}
+          note="PD ≤ 1.05 Hz"
+          flag={m?.rest?.tsi != null && m.rest.tsi <= 1.05}
+        />
+        <Metric
+          label="% Time tremor"
+          value={m?.rest?.ptt != null ? `${(m.rest.ptt * 100).toFixed(1)}%` : '—'}
+          note="PD: ≥ 0.8%"
+          flag={m?.rest?.ptt != null && m.rest.ptt >= 0.008}
+        />
+        <Metric
+          label="Tremor volume"
+          value={m?.rest?.tremor_volume != null ? m.rest.tremor_volume.toFixed(1) : '—'}
+          note="PD: >100.4°"
+          flag={m?.rest?.tremor_volume > 100.4}
+        />
+      </div>
+
+      <p className="result-section-label">Tracking biomarkers</p>
+      <div className="metrics-grid">
+        <Metric
+          label="SPARC smoothness"
+          value={tm?.sparc != null ? tm.sparc.toFixed(2) : '—'}
+          note="PD: < −6.1"
+          flag={tm?.sparc != null && tm.sparc < -6.1}
+        />
+        <Metric
+          label="Submovements/s"
+          value={tm?.submovementRate != null ? tm.submovementRate.toFixed(2) : '—'}
+          note="PD: > 1.5/s"
+          flag={tm?.submovementRate > 1.5}
+        />
+        <Metric
+          label="Tracking RMSE"
+          value={tm?.rmse != null ? tm.rmse.toFixed(3) : '—'}
+          note="PD: > 0.35"
+          flag={tm?.rmse > 0.35}
+        />
+        <Metric
+          label="Rest suppression"
+          value={m?.rest_suppression ? 'Yes' : 'No'}
+          note="Yes = PD signal"
+          flag={m?.rest_suppression}
+        />
+      </div>
+
+      {ai && !ai.parse_error && (
+        <div className={`verdict ${ai.likelihood_percentage > 40 ? 'positive' : ''}`}>
+          <div className="likelihood">
+            <span className="likelihood-pct">{Number(ai.likelihood_percentage).toFixed(0)}%</span>
+            <span className="likelihood-label">PD biomarker correlation</span>
+          </div>
+          <p className="ai-dominant">{ai.dominant_finding}</p>
+          <p className="ai-reasoning">{ai.consensus_reasoning}</p>
+          <p className="ai-nudge">{ai.behavioral_nudge}</p>
+        </div>
+      )}
+
+      {ai?.parse_error && (
+        <div className="verdict error"><p>{ai.raw_response}</p></div>
+      )}
+    </div>
+  )
+}
+
+function Metric({ label, value, note, flag }) {
+  return (
+    <div className={`metric ${flag ? 'flagged' : ''}`}>
+      <span className="metric-label">{label}</span>
+      <span className="metric-value">{value}</span>
+      {note && <span className="metric-note">{note}</span>}
     </div>
   )
 }
