@@ -97,6 +97,16 @@
   background: var(--cyan);
   box-shadow: 0 0 12px var(--cyan-glow);
   transition: left 0.05s ease-out, top 0.05s ease-out;
+  pointer-events: none;
+}
+
+.target-dot {
+  background: transparent;
+  border: 3px solid #f0f0f0;
+  box-shadow: 0 0 16px rgba(255, 255, 255, 0.4);
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
 }
 
 .axis-labels {
@@ -210,6 +220,13 @@
 .btn-rest { border-left: 3px solid var(--cyan); }
 .btn-active { border-left: 3px solid var(--text-muted); }
 
+.btn-start-test {
+  width: 100%;
+  margin-bottom: 1rem;
+  border-left: 3px solid var(--cyan);
+  font-weight: 600;
+}
+
 .verdict {
   margin-top: 1rem;
   padding: 1rem;
@@ -248,6 +265,151 @@
 
 .research-footer a:hover {
   text-decoration: underline;
+}
+
+/* ——— Full-screen tracking test ——— */
+.test-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: var(--bg-deep);
+  display: flex;
+  flex-direction: column;
+  padding: 1.5rem;
+}
+
+.test-overlay.running {
+  cursor: crosshair;
+}
+
+.test-instruction {
+  text-align: center;
+  font-size: 1.1rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+
+.test-timer {
+  text-align: center;
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--cyan);
+  margin-bottom: 0.5rem;
+}
+
+.test-progress-bar {
+  height: 6px;
+  background: var(--bg-elevated);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 1rem;
+  max-width: 400px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.test-progress-fill {
+  height: 100%;
+  background: var(--cyan);
+  transition: width 0.1s linear;
+}
+
+.test-coords {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  margin-bottom: 0.75rem;
+}
+
+.test-playfield {
+  flex: 1;
+  min-height: 60vh;
+  position: relative;
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-panel);
+}
+
+.test-target-dot,
+.test-user-dot {
+  will-change: left, top;
+  contain: layout style paint;
+}
+
+.test-target-dot {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: transparent;
+  border: 4px solid #fff;
+  box-shadow: 0 0 24px rgba(255, 255, 255, 0.5);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
+.test-user-dot {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 16px var(--cyan-glow);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
+.test-analyzing {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.25rem;
+  color: var(--cyan);
+}
+
+.test-done-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  max-width: 640px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.test-done-panel h2 {
+  margin: 0 0 1rem;
+  font-size: 1.5rem;
+  color: var(--text);
+}
+
+.test-error {
+  color: var(--danger);
+  margin-bottom: 1rem;
+}
+
+.test-gemini-result {
+  width: 100%;
+  max-height: 40vh;
+  overflow: auto;
+  padding: 1rem;
+  background: var(--bg-elevated);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 0.85rem;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 1rem;
+}
+
+.btn-done {
+  flex: none;
+  padding: 0.75rem 1.5rem;
+  border-left: 3px solid var(--cyan);
 }
 
 @media (max-width: 900px) {
