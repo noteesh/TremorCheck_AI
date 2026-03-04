@@ -10,12 +10,10 @@ const TRACKING_DURATION_MS = 30 * 1000
 const SAMPLE_INTERVAL_MS = 500
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000'
 const THROTTLE_MS = 33 // ~30fps UI updates to reduce lag (data still sampled at 60fps)
-const TRACKING_SENSITIVITY = 0.5 // 0–1: lower = less movement of your dot for same mouse/stick input
-const CONTROLLER_RANGE_SCALE = 2.2 // scale stick so limited physical radius still reaches full area (then clamp to ±1)
+const CONTROLLER_RANGE_SCALE = 1.0 // scale stick input (1.0 = full natural range)
 
-const RUMBLE_DEAD_ZONE = 0.12   // no rumble within this distance of target
-const RUMBLE_THRESHOLD = 0.30   // rumble starts here, grows to full at max dist (~1.4)
-const RUMBLE_DURATION_MIN = 20  // ms at low intensity
+const RUMBLE_THRESHOLD = 0.30   // rumble reaches full at this dist (~1.4 max)
+const RUMBLE_DURATION_MIN = 15  // ms at low intensity
 const RUMBLE_DURATION_MAX = 120 // ms at full intensity
 
 function useGamepadSlidingWindow() {
@@ -80,8 +78,8 @@ function useGamepadSlidingWindow() {
       const pfW = rumblePlayfieldRef.current?.offsetWidth ?? 800
       const dotDeadZone = (16 / pfW) * 2   // 16px = half of 32px target dot
       if (dist > dotDeadZone) {
-        // ramp from 0 just outside dot to 1 at max distance (~1.41 diagonal)
-        const t = Math.min(1, Math.max(0, (dist - RUMBLE_THRESHOLD) / (1.41 - RUMBLE_THRESHOLD)))
+        // ramp from 0 just outside dot to 1 at RUMBLE_THRESHOLD, then stays full
+        const t = Math.min(1, Math.max(0, (dist - dotDeadZone) / (RUMBLE_THRESHOLD - dotDeadZone)))
         const duration = Math.round(RUMBLE_DURATION_MIN + t * (RUMBLE_DURATION_MAX - RUMBLE_DURATION_MIN))
         pad.vibrationActuator.playEffect('dual-rumble', {
           startDelay: 0,
@@ -171,7 +169,7 @@ function useTestMode() {
 const FIGURE8_PERIOD_SEC = 20 // slightly faster than 30s
 function figure8Position(elapsedMs) {
   const t = (elapsedMs / 1000) * (2 * Math.PI) / FIGURE8_PERIOD_SEC
-  const scale = 0.48 // keep target path small so limited stick radius can reach it
+  const scale = 0.85 // target path uses most of the playfield
   return {
     x: scale * Math.sin(t),
     y: scale * Math.sin(2 * t),
@@ -413,8 +411,8 @@ export default function App() {
                 <div
                   className="test-user-dot"
                   style={{
-                    left: `${Math.max(2, Math.min(98, 50 + stick.x * 45 * TRACKING_SENSITIVITY))}%`,
-                    top:  `${Math.max(2, Math.min(98, 50 - stick.y * 45 * TRACKING_SENSITIVITY))}%`,
+                    left: `${Math.max(2, Math.min(98, 50 + stick.x * 45))}%`,
+                    top:  `${Math.max(2, Math.min(98, 50 - stick.y * 45))}%`,
                   }}
                 />
               </div>
