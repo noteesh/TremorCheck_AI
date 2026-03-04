@@ -544,7 +544,7 @@
 
 .test-instruction-bar {
   text-align: center;
-  padding: 0.5rem 1rem;
+  padding: 0.75rem 1.75rem;
   font-size: 0.85rem;
   color: var(--text-muted);
   background: rgba(10, 14, 18, 0.6);
@@ -552,17 +552,86 @@
   flex-shrink: 0;
 }
 
+.test-instruction-note {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+/* Main row: playfield + side panel */
+.test-main-row {
+  flex: 1;
+  display: flex;
+  gap: 1.5rem;
+  padding: 0.75rem 1.75rem 1.75rem;
+  align-items: stretch;
+  min-height: 0;
+}
+
+.test-side-panel {
+  width: 260px;
+  max-width: 30%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.test-side-message {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  background: rgba(10, 14, 18, 0.75);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem 0.9rem;
+}
+
+.test-distance-label {
+  margin-top: 0.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--cyan);
+}
+
 /* Accuracy mini-chart */
 .test-chart-bar {
   flex-shrink: 0;
-  padding: 0.6rem 1.75rem;
+  padding: 0.6rem 0.9rem;
   background: rgba(10, 14, 18, 0.5);
-  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.test-chart-bar--side {
+  margin-top: 0.25rem;
+}
+
+.test-chart-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.3rem;
+}
+
+.test-chart-scale-vertical {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  padding: 2px 0;
+}
+
+.test-chart-scale-vertical span:first-child {
+  align-self: flex-start;
+}
+
+.test-chart-scale-vertical span:last-child {
+  align-self: flex-end;
 }
 
 .test-accuracy-line-chart {
   width: 100%;
-  height: 44px;
+  height: 72px;
   display: block;
 }
 
@@ -570,9 +639,9 @@
 .test-playfield {
   flex: 1;
   min-height: 0;
-  width: calc(100% - 3rem);
-  max-width: 1600px;
-  margin: 0.75rem auto;
+  width: 100%;
+  max-width: none;
+  margin: 0;
   position: relative;
   border: 1px solid var(--border-bright);
   border-radius: var(--radius-xl);

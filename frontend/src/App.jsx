@@ -25,7 +25,7 @@ const RUMBLE_STRONG_MAX = 0.18       // max strong motor magnitude (was 0.45)
 const FIGURE8_PERIOD_SEC = 20
 function figure8Position(elapsedMs) {
   const t = (elapsedMs / 1000) * (2 * Math.PI) / FIGURE8_PERIOD_SEC
-  const scale = 0.85
+  const scale = 0.75
   return {
     x: scale * Math.sin(t),
     y: scale * Math.sin(2 * t),
@@ -311,9 +311,14 @@ export default function App() {
   const totalSec = TRACKING_DURATION_MS / 1000
   const restSecsLeft = Math.max(0, Math.ceil((REST_DURATION_MS - restElapsed) / 1000))
 
-  const nowAccuracy = lastComparison
-    ? Math.max(0, 1 - Math.hypot(lastComparison.dot.x - lastComparison.target.x, lastComparison.dot.y - lastComparison.target.y) / 2)
+  const nowDistance = lastComparison
+    ? Math.hypot(
+        lastComparison.dot.x - lastComparison.target.x,
+        lastComparison.dot.y - lastComparison.target.y,
+      )
     : null
+
+  const nowAccuracy = nowDistance != null ? Math.max(0, 1 - nowDistance / 2) : null
 
   // ── Mouse handlers ────────────────────────────────────────────────────────
   const handlePlayfieldMouseMove = useCallback((e) => {
@@ -379,61 +384,101 @@ export default function App() {
               {/* Instruction */}
               <div className="test-instruction-bar">
                 Follow the <strong style={{ color: '#fff' }}>white ring</strong> — keep your{' '}
-                <strong style={{ color: 'var(--cyan)' }}>cyan dot</strong> as close to it as possible
+                <strong style={{ color: 'var(--cyan)' }}>cyan dot</strong> as close to it as possible.
+                <span className="test-instruction-note">
+                  Keep your finger on the controller at all times for the most accurate result.
+                </span>
               </div>
 
-              {/* Mini accuracy chart */}
-              {accuracyHistory.length > 1 && (
-                <div className="test-chart-bar">
-                  <svg className="test-accuracy-line-chart" viewBox="0 0 800 44" preserveAspectRatio="none">
-                    {(() => {
-                      const w = 800, h = 40
-                      const n = accuracyHistory.length
-                      const pts = accuracyHistory.map((a, i) => {
-                        const px = n > 1 ? (i / (n - 1)) * w : 0
-                        const py = h * (1 - a) + 2
-                        return `${px},${py}`
-                      }).join(' ')
-                      const fillPts = `0,${h + 2} ${pts} ${w},${h + 2}`
-                      return (
-                        <>
-                          <defs>
-                            <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
-                              <stop offset="0%" stopColor="var(--cyan)" stopOpacity="0.18" />
-                              <stop offset="100%" stopColor="var(--cyan)" stopOpacity="0" />
-                            </linearGradient>
-                          </defs>
-                          <polygon fill="url(#chartFill)" points={fillPts} />
-                          <polyline fill="none" stroke="var(--cyan)" strokeWidth="1.5"
-                            strokeLinecap="round" strokeLinejoin="round" points={pts} />
-                        </>
-                      )
-                    })()}
-                  </svg>
+              {/* Main layout: playfield + side panel */}
+              <div className="test-main-row">
+                <div
+                  className="test-playfield"
+                  ref={(el) => {
+                    playfieldRef.current = el
+                    rumblePlayfieldRef.current = el
+                  }}
+                  onMouseMove={handlePlayfieldMouseMove}
+                  onMouseLeave={() => setMouse(0, 0)}
+                >
+                  <div
+                    className="test-target-dot"
+                    style={{
+                      left: `${50 + (targetPosition?.x ?? 0) * 40}%`,
+                      top: `${50 - (targetPosition?.y ?? 0) * 40}%`,
+                    }}
+                  />
+                  <div
+                    className="test-user-dot"
+                    style={{
+                      left: `${Math.max(5, Math.min(95, 50 + stick.x * 40))}%`,
+                      top: `${Math.max(5, Math.min(95, 50 - stick.y * 40))}%`,
+                    }}
+                  />
                 </div>
-              )}
 
-              {/* Playfield */}
-              <div
-                className="test-playfield"
-                ref={(el) => { playfieldRef.current = el; rumblePlayfieldRef.current = el }}
-                onMouseMove={handlePlayfieldMouseMove}
-                onMouseLeave={() => setMouse(0, 0)}
-              >
-                <div
-                  className="test-target-dot"
-                  style={{
-                    left: `${50 + (targetPosition?.x ?? 0) * 45}%`,
-                    top:  `${50 - (targetPosition?.y ?? 0) * 45}%`,
-                  }}
-                />
-                <div
-                  className="test-user-dot"
-                  style={{
-                    left: `${Math.max(2, Math.min(98, 50 + stick.x * 45))}%`,
-                    top:  `${Math.max(2, Math.min(98, 50 - stick.y * 45))}%`,
-                  }}
-                />
+                <aside className="test-side-panel" aria-label="Tracking accuracy over time">
+                  <div className="test-side-message">
+                    Keep your finger on the controller at all times.
+                  </div>
+                  {accuracyHistory.length > 1 && (
+                    <div className="test-chart-bar test-chart-bar--side">
+                      <div className="test-chart-row">
+                        <div className="test-chart-scale-vertical">
+                          <span>1.0</span>
+                          <span>0.5</span>
+                          <span>0.0</span>
+                        </div>
+                        <svg
+                          className="test-accuracy-line-chart"
+                          viewBox="0 0 800 80"
+                          preserveAspectRatio="none"
+                        >
+                          {(() => {
+                            const w = 800
+                            const h = 64
+                            const topPad = 6
+                            const bottomPad = 6
+                            const n = accuracyHistory.length
+                            const pts = accuracyHistory
+                              .map((a, i) => {
+                                const px = n > 1 ? (i / (n - 1)) * w : 0
+                                const py =
+                                  topPad + (h - topPad - bottomPad) * (1 - a)
+                                return `${px},${py}`
+                              })
+                              .join(' ')
+                            const fillPts = `0,${h + bottomPad} ${pts} ${w},${h + bottomPad}`
+                            return (
+                              <>
+                                <defs>
+                                  <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="0%" stopColor="var(--cyan)" stopOpacity="0.18" />
+                                    <stop offset="100%" stopColor="var(--cyan)" stopOpacity="0" />
+                                  </linearGradient>
+                                </defs>
+                                <polygon fill="url(#chartFill)" points={fillPts} />
+                                <polyline
+                                  fill="none"
+                                  stroke="var(--cyan)"
+                                  strokeWidth="1.5"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  points={pts}
+                                />
+                              </>
+                            )
+                          })()}
+                        </svg>
+                      </div>
+                    </div>
+                  )}
+                  {nowDistance != null && (
+                    <div className="test-distance-label">
+                      Current distance: {nowDistance.toFixed(2)}
+                    </div>
+                  )}
+                </aside>
               </div>
             </>
           )}
