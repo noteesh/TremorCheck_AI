@@ -11,6 +11,7 @@ const SAMPLE_INTERVAL_MS = 500
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000'
 const THROTTLE_MS = 33 // ~30fps UI updates to reduce lag (data still sampled at 60fps)
 const TRACKING_SENSITIVITY = 0.5 // 0–1: lower = less movement of your dot for same mouse/stick input
+const CONTROLLER_RANGE_SCALE = 2.2 // scale stick so limited physical radius still reaches full area (then clamp to ±1)
 
 function useGamepadSlidingWindow() {
   const [stick, setStick] = useState({ x: 0, y: 0 })
@@ -48,8 +49,12 @@ function useGamepadSlidingWindow() {
     const pad = gp?.[0]
     let x = 0, y = 0
     if (pad) {
-      x = pad.axes[0] ?? 0
-      y = -(pad.axes[1] ?? 0) // negate so stick "up" (-1) = dot up
+      let rx = pad.axes[0] ?? 0
+      let ry = -(pad.axes[1] ?? 0) // negate so stick "up" (-1) = dot up
+      rx = Math.max(-1, Math.min(1, rx * CONTROLLER_RANGE_SCALE))
+      ry = Math.max(-1, Math.min(1, ry * CONTROLLER_RANGE_SCALE))
+      x = rx
+      y = ry
     } else {
       x = mouseRef.current.x
       y = mouseRef.current.y
@@ -134,7 +139,7 @@ function useTestMode() {
 const FIGURE8_PERIOD_SEC = 20 // slightly faster than 30s
 function figure8Position(elapsedMs) {
   const t = (elapsedMs / 1000) * (2 * Math.PI) / FIGURE8_PERIOD_SEC
-  const scale = 0.75
+  const scale = 0.48 // keep target path small so limited stick radius can reach it
   return {
     x: scale * Math.sin(t),
     y: scale * Math.sin(2 * t),
@@ -159,6 +164,8 @@ export default function App() {
   const stickRef = useRef(stick)
   stickRef.current = stick
   const [lastComparison, setLastComparison] = useState(null)
+  const [accuracyHistory, setAccuracyHistory] = useState([])
+  const maxAccuracyPoints = 30
 
   // Start full-screen 30s figure-8 test
   const startTest = useCallback(() => {
@@ -168,6 +175,7 @@ export default function App() {
     setGeminiError(null)
     setTrackingElapsed(0)
     setLastComparison(null)
+    setAccuracyHistory([])
     setTestPhase('running')
 
     // Sample user position every 0.5s
@@ -176,13 +184,16 @@ export default function App() {
       samplesRef.current.push([pos.x, pos.y])
     }, SAMPLE_INTERVAL_MS)
 
-    // Print cursor vs target every 1s (console + on-screen)
+    // Every 1s: log cursor vs target and compute accuracy for chart
     comparisonIntervalRef.current = setInterval(() => {
       const elapsed = Date.now() - phaseStartRef.current
       const target = figure8Position(elapsed)
       const cursor = { x: stickRef.current.x, y: stickRef.current.y }
       console.log(`[${(elapsed / 1000).toFixed(1)}s] Cursor: (${cursor.x.toFixed(3)}, ${cursor.y.toFixed(3)})  Target: (${target.x.toFixed(3)}, ${target.y.toFixed(3)})`)
       setLastComparison({ cursor, target, elapsed })
+      const dist = Math.hypot(cursor.x - target.x, cursor.y - target.y)
+      const accuracy = Math.max(0, 1 - dist / 2)
+      setAccuracyHistory((prev) => [...prev.slice(1 - maxAccuracyPoints), accuracy])
     }, 1000)
   }, [])
 
@@ -278,9 +289,6 @@ export default function App() {
     if (bufferLength >= WINDOW_FRAMES) test.updateLatest(spectrum, dominantInPD)
   }, [bufferLength, spectrum, dominantInPD, test.updateLatest])
 
-  const displaySpectrum = spectrum
-  const highlightPD = dominantInPD
-
   const progress = Math.min(1, trackingElapsed / TRACKING_DURATION_MS)
   const sec = Math.floor(trackingElapsed / 1000)
   const totalSec = TRACKING_DURATION_MS / 1000
@@ -310,6 +318,37 @@ export default function App() {
                   Cursor: ({lastComparison.cursor.x.toFixed(2)}, {lastComparison.cursor.y.toFixed(2)})
                   {'  ·  '}
                   Target: ({lastComparison.target.x.toFixed(2)}, {lastComparison.target.y.toFixed(2)})
+                </div>
+              )}
+              {accuracyHistory.length > 0 && (
+                <div className="test-accuracy-chart">
+                  <div className="test-accuracy-label">
+                    Accuracy over time (each point = 1s, not cumulative) — {lastComparison ? (Math.max(0, 1 - Math.hypot(lastComparison.cursor.x - lastComparison.target.x, lastComparison.cursor.y - lastComparison.target.y) / 2) * 100).toFixed(0) : 0}% now
+                  </div>
+                  <svg className="test-accuracy-line-chart" viewBox="0 0 360 56" preserveAspectRatio="none">
+                    {(() => {
+                      const w = 360
+                      const h = 52
+                      const n = accuracyHistory.length
+                      const points = accuracyHistory.map((a, i) => {
+                        const x = n > 1 ? (i / (n - 1)) * w : 0
+                        const y = h * (1 - a)
+                        return `${x},${y}`
+                      }).join(' ')
+                      return (
+                        <>
+                          <polyline
+                            fill="none"
+                            stroke="var(--cyan)"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            points={points}
+                          />
+                        </>
+                      )
+                    })()}
+                  </svg>
                 </div>
               )}
               <div className="test-playfield">
@@ -352,101 +391,42 @@ export default function App() {
 
       <header className="header">
         <h1>TremorCheck AI</h1>
-        <span className="subtitle">Diagnostic Dashboard</span>
-        {usingMouse && testPhase === 'idle' && (
-          <p className="hint-inline">Use mouse or Xbox controller. Start the test to follow the dot.</p>
-        )}
+        <span className="subtitle">Tracking test · tremor-aware feedback</span>
       </header>
 
-      <main className="panels">
-        <section className="panel left">
-          <h2>Input Calibration</h2>
-          <p className="hint">{usingMouse ? 'Mouse · Move in circle' : 'Xbox Left Stick · Live'}</p>
-          <button type="button" className="btn btn-start-test" onClick={startTest}>
-            Start 30s tracking test (figure-8)
-          </button>
+      <main className="dashboard-main">
+        <p className="dashboard-intro">
+          Run the 30-second tracking test: follow the moving dot with your controller or mouse.
+          We record your position every 0.5s and send it to Gemini for tremor-related feedback.
+        </p>
+        <button type="button" className="btn btn-start-test btn-primary" onClick={startTest}>
+          Start 30s tracking test
+        </button>
+        <div className="dashboard-check">
+          <span className="dashboard-check-label">Input check</span>
           <div
-            className="stick-viz"
+            className="stick-viz stick-viz-small"
             onMouseMove={handleStickMouseMove}
             onMouseLeave={() => reportMousePosition(0, 0)}
             role="img"
-            aria-label="Tracking area"
+            aria-label="Input preview"
           >
             <div className="stick-base" />
             <div
               className="stick-dot"
               style={{
-                left: `calc(50% + ${stick.x * 45}%)`,
-                top: `calc(50% - ${stick.y * 45}%)`,
+                left: `calc(50% + ${stick.x * 38}%)`,
+                top: `calc(50% - ${stick.y * 38}%)`,
               }}
             />
           </div>
-          <div className="axis-labels">
-            <span>X: {(stick.x * 100).toFixed(0)}%</span>
-            <span>Y: {(stick.y * 100).toFixed(0)}%</span>
-          </div>
-        </section>
-
-        <section className="panel middle">
-          <h2>Frequency Spectrogram</h2>
-          <p className="hint">1–20 Hz · Real-time</p>
-          <div className="spectrogram">
-            {displaySpectrum.map((val, i) => {
-              const hz = i + 1
-              const inPD = hz >= PD_LOW && hz <= PD_HIGH
-              const max = Math.max(1, ...displaySpectrum)
-              const h = max ? (val / max) * 100 : 0
-              return (
-                <div
-                  key={hz}
-                  className={`bar ${inPD && highlightPD ? 'pd-range' : ''}`}
-                  style={{ height: `${Math.max(2, h)}%` }}
-                  title={`${hz} Hz`}
-                />
-              )
-            })}
-          </div>
-          <div className="spectrogram-labels">
-            <span>1 Hz</span>
-            <span>4–6 Hz (PD range)</span>
-            <span>20 Hz</span>
-          </div>
-        </section>
-
-        <section className="panel right">
-          <h2>Diagnostic Status</h2>
-          <div className="status-block rest">
-            <span className="status-label">Resting</span>
-            <span className={`status-badge ${test.restFreqInPD ? 'active' : ''}`}>
-              {test.restSpectrum != null ? (test.restFreqInPD ? '4–6 Hz' : 'Other') : '—'}
-            </span>
-          </div>
-          <div className="status-block active">
-            <span className="status-label">Active</span>
-            <span className={`status-badge ${test.activeFreqInPD ? 'active' : ''}`}>
-              {test.activeSpectrum != null ? (test.activeFreqInPD ? '4–6 Hz' : 'Other') : '—'}
-            </span>
-          </div>
-          <div className="test-buttons">
-            <button
-              className="btn btn-rest"
-              onClick={test.captureRest}
-              disabled={bufferLength < WINDOW_FRAMES}
-            >
-              Capture Rest
-            </button>
-            <button
-              className="btn btn-active"
-              onClick={test.captureActive}
-              disabled={bufferLength < WINDOW_FRAMES}
-            >
-              Capture Active
-            </button>
-          </div>
-          <div className={`verdict ${test.restFreqInPD && !test.activeFreqInPD ? 'positive' : ''}`}>
-            {test.verdict}
-          </div>
-        </section>
+          <span className="dashboard-check-hint">
+            {usingMouse ? 'Mouse: move in circle' : 'Controller: left stick'} — if this moves, you’re good to go.
+          </span>
+        </div>
+        <p className="dashboard-about">
+          During the test you’ll see an accuracy chart (how close you are to the target). After 30s, your data is analyzed and you’ll get a short report. This is for awareness only — not a medical diagnosis.
+        </p>
       </main>
 
       <footer className="research-footer">

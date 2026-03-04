@@ -33,6 +33,61 @@
   color: var(--cyan-dim);
 }
 
+.dashboard-main {
+  flex: 1;
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.dashboard-intro {
+  color: var(--text-muted);
+  font-size: 1rem;
+  line-height: 1.5;
+  margin: 0 0 1.5rem;
+}
+
+.dashboard-main .btn-primary {
+  font-size: 1.1rem;
+  padding: 0.9rem 1.75rem;
+  margin-bottom: 2rem;
+}
+
+.dashboard-check {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.dashboard-check-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.stick-viz-small {
+  max-width: 140px; /* slightly bigger so dot stays inside circle */
+}
+
+.dashboard-check-hint {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.dashboard-about {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 0;
+}
+
 .panels {
   flex: 1;
   display: grid;
@@ -322,9 +377,34 @@
   margin-bottom: 0.75rem;
 }
 
+.test-accuracy-chart {
+  margin-bottom: 1rem;
+  width: 100%;
+  max-width: 360px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.test-accuracy-label {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 0.35rem;
+}
+
+.test-accuracy-line-chart {
+  width: 100%;
+  height: 56px;
+  display: block;
+  background: var(--bg-elevated);
+  border-radius: 6px;
+}
+
 .test-playfield {
   flex: 1;
-  min-height: 60vh;
+  min-height: 50vh;
+  max-width: 360px;
+  margin: 0 auto;
+  width: 100%;
   position: relative;
   border: 2px solid var(--border);
   border-radius: 12px;
