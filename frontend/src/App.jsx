@@ -10,7 +10,11 @@ const TRACKING_DURATION_MS = 30 * 1000
 const SAMPLE_INTERVAL_MS = 500
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000'
 const THROTTLE_MS = 33 // ~30fps UI updates to reduce lag (data still sampled at 60fps)
-const CONTROLLER_RANGE_SCALE = 1.0 // scale stick input (1.0 = full natural range)
+const TRACKING_SENSITIVITY = 0.5 // 0–1: lower = less movement of your dot for same mouse/stick input
+const CONTROLLER_RANGE_SCALE = 2.2 // scale stick so limited physical radius still reaches full area (then clamp to ±1)
+const IDLE_RESET_MS = 1500 // reset dot to center after no input for this long
+const VELOCITY_SPEED = 1.8 // units per second at full stick (integrated movement)
+const INPUT_DEADZONE = 0.22 // stick magnitude below this = no input (avoids rest-position drift)
 
 const RUMBLE_THRESHOLD = 0.30   // rumble reaches full at this dist (~1.4 max)
 const RUMBLE_DURATION_MIN = 15  // ms at low intensity
@@ -26,7 +30,10 @@ function useGamepadSlidingWindow() {
   const rafRef = useRef(null)
   const mouseRef = useRef({ x: 0, y: 0 })
   const lastRenderRef = useRef(0)
-  const pendingStickRef = useRef({ x: 0, y: 0 })
+  const dotPosRef = useRef({ x: 0, y: 0 })
+  const lastInputTimeRef = useRef(performance.now())
+  const lastTickTimeRef = useRef(performance.now())
+  const lastMouseInputTimeRef = useRef(performance.now())
   // Set to current target position during test, null otherwise
   const rumbleTargetRef = useRef(null)
   // Set to the playfield DOM element so tick can compute dot size in normalized coords
@@ -49,33 +56,55 @@ function useGamepadSlidingWindow() {
       x: Math.max(-1, Math.min(1, x)),
       y: Math.max(-1, Math.min(1, y)),
     }
+    lastMouseInputTimeRef.current = performance.now()
   }, [])
 
   const tick = useCallback(() => {
+    const now = performance.now()
+    const dt = Math.min((now - lastTickTimeRef.current) / 1000, 0.1)
+    lastTickTimeRef.current = now
+
     const gp = navigator.getGamepads?.()
     const pad = gp?.[0]
-    let x = 0, y = 0
+    const dot = dotPosRef.current
+
     if (pad) {
       let rx = pad.axes[0] ?? 0
-      let ry = -(pad.axes[1] ?? 0) // negate so stick "up" (-1) = dot up
+      let ry = -(pad.axes[1] ?? 0)
       rx = Math.max(-1, Math.min(1, rx * CONTROLLER_RANGE_SCALE))
       ry = Math.max(-1, Math.min(1, ry * CONTROLLER_RANGE_SCALE))
-      x = rx
-      y = ry
+      const mag = Math.hypot(rx, ry)
+      if (mag > INPUT_DEADZONE) {
+        // optional: rescale so movement starts at deadzone edge (smoother feel)
+        const scale = (mag - INPUT_DEADZONE) / (1 - INPUT_DEADZONE)
+        const vx = (rx / mag) * scale * VELOCITY_SPEED * dt
+        const vy = (ry / mag) * scale * VELOCITY_SPEED * dt
+        dot.x = Math.max(-1, Math.min(1, dot.x + vx))
+        dot.y = Math.max(-1, Math.min(1, dot.y + vy))
+        lastInputTimeRef.current = now
+      } else if (now - lastInputTimeRef.current >= IDLE_RESET_MS) {
+        dot.x = 0
+        dot.y = 0
+      }
     } else {
-      x = mouseRef.current.x
-      y = mouseRef.current.y
+      dot.x = mouseRef.current.x
+      dot.y = mouseRef.current.y
+      if (now - lastMouseInputTimeRef.current >= IDLE_RESET_MS) {
+        dot.x = 0
+        dot.y = 0
+      } else {
+        lastInputTimeRef.current = lastMouseInputTimeRef.current
+      }
     }
-    pendingStickRef.current = { x, y }
 
     // Haptic feedback: scales smoothly with distance — silent on the dot, strong when far
-    if (pad?.vibrationActuator && rumbleTargetRef.current) {
+    if (pad?.vibrationActuator && rumbleTargetRef.current && rumblePlayfieldRef.current) {
       const target = rumbleTargetRef.current
-      const dist = Math.hypot(x - target.x, y - target.y)
+      const dist = Math.hypot(dot.x - target.x, dot.y - target.y)
       // Compute dead zone = visual radius of the target dot (16px) in normalized coords.
       // The playfield maps its full width to [-1, 1], and dots travel ±45% of that.
       // normalized_radius = (dot_px_radius / playfield_px_width) * 2
-      const pfW = rumblePlayfieldRef.current?.offsetWidth ?? 800
+      const pfW = rumblePlayfieldRef.current.offsetWidth || 800
       const dotDeadZone = (16 / pfW) * 2   // 16px = half of 32px target dot
       if (dist > dotDeadZone) {
         // ramp from 0 just outside dot to 1 at RUMBLE_THRESHOLD, then stays full
@@ -91,12 +120,11 @@ function useGamepadSlidingWindow() {
     }
 
     const buf = bufferRef.current
-    buf.push(x)
+    buf.push(dot.x)
     if (buf.length > WINDOW_FRAMES) buf.shift()
-    const now = performance.now()
     if (now - lastRenderRef.current >= THROTTLE_MS) {
       lastRenderRef.current = now
-      setStick(pendingStickRef.current)
+      setStick({ x: dot.x, y: dot.y })
       setBufferLength(buf.length)
       if (buf.length >= WINDOW_FRAMES) {
         const spec = getMagnitudeSpectrum1To20Hz(buf, SAMPLE_RATE)
@@ -110,6 +138,8 @@ function useGamepadSlidingWindow() {
   const clearBuffer = useCallback(() => {
     bufferRef.current = []
     setBufferLength(0)
+    dotPosRef.current = { x: 0, y: 0 }
+    setStick({ x: 0, y: 0 })
   }, [])
 
   useEffect(() => {
@@ -214,15 +244,19 @@ export default function App() {
       samplesRef.current.push([pos.x, pos.y])
     }, SAMPLE_INTERVAL_MS)
 
-    // Every 1s: log cursor vs target and compute accuracy for chart
+    // Every 1s: log dot vs target and compute accuracy for chart
     comparisonIntervalRef.current = setInterval(() => {
       const elapsed = Date.now() - phaseStartRef.current
       const target = figure8Position(elapsed)
-      const cursor = { x: stickRef.current.x, y: stickRef.current.y }
-      console.log(`[${(elapsed / 1000).toFixed(1)}s] Cursor: (${cursor.x.toFixed(3)}, ${cursor.y.toFixed(3)})  Target: (${target.x.toFixed(3)}, ${target.y.toFixed(3)})`)
-      setLastComparison({ cursor, target, elapsed })
-      const dist = Math.hypot(cursor.x - target.x, cursor.y - target.y)
+      const dot = { x: stickRef.current.x, y: stickRef.current.y }
+      console.log(
+        `[${(elapsed / 1000).toFixed(1)}s] Dot: (${dot.x.toFixed(3)}, ${dot.y.toFixed(
+          3,
+        )})  Target: (${target.x.toFixed(3)}, ${target.y.toFixed(3)})`,
+      )
+      const dist = Math.hypot(dot.x - target.x, dot.y - target.y)
       const accuracy = Math.max(0, 1 - dist / 2)
+      setLastComparison({ dot, target, elapsed })
       setAccuracyHistory((prev) => [...prev.slice(1 - maxAccuracyPoints), accuracy])
     }, 1000)
   }, [])
@@ -329,10 +363,14 @@ export default function App() {
   const totalSec = TRACKING_DURATION_MS / 1000
 
   const nowAccuracy = lastComparison
-    ? Math.max(0, 1 - Math.hypot(
-        lastComparison.cursor.x - lastComparison.target.x,
-        lastComparison.cursor.y - lastComparison.target.y
-      ) / 2)
+    ? Math.max(
+        0,
+        1 -
+          Math.hypot(
+            lastComparison.dot.x - lastComparison.target.x,
+            lastComparison.dot.y - lastComparison.target.y,
+          ) / 2,
+      )
     : null
 
   return (
@@ -354,7 +392,18 @@ export default function App() {
                     ◎ {(nowAccuracy * 100).toFixed(0)}%
                   </div>
                 )}
-                <div className="test-timer">{sec}s<span style={{color:'var(--text-dim)',fontSize:'1rem',fontWeight:400}}>/{totalSec}</span></div>
+                <div className="test-timer">
+                  {sec}s
+                  <span
+                    style={{
+                      color: 'var(--text-dim)',
+                      fontSize: '1rem',
+                      fontWeight: 400,
+                    }}
+                  >
+                    /{totalSec}
+                  </span>
+                </div>
               </div>
 
               {/* Instruction */}
